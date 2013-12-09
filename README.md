@@ -33,7 +33,7 @@ require "redis"
 redis = Redis.new
 ```
 
-This assumes Redis was started with a default configuration, and it
+This assumes Redis was started with a default configuration, and is
 listening on `localhost`, port 6379. If you need to connect to a remote
 server or a different port, try:
 
@@ -45,6 +45,12 @@ To connect to Redis listening on a Unix socket, try:
 
 ```ruby
 redis = Redis.new(:path => "/tmp/redis.sock")
+```
+
+To connect to a password protected Redis instance, use:
+
+```ruby
+redis = Redis.new(:password => "mysecret")
 ```
 
 The Redis class exports methods that are named identical to the commands
@@ -205,8 +211,9 @@ against the following interpreters and drivers:
 * MRI 1.8.7 (drivers: ruby, hiredis)
 * MRI 1.9.2 (drivers: ruby, hiredis, synchrony)
 * MRI 1.9.3 (drivers: ruby, hiredis, synchrony)
-* JRuby 1.6 (1.8 mode) (drivers: ruby)
-* JRuby 1.6 (1.9 mode) (drivers: ruby)
+* MRI 2.0.0 (drivers: ruby, hiredis, synchrony)
+* JRuby 1.7 (1.8 mode) (drivers: ruby)
+* JRuby 1.7 (1.9 mode) (drivers: ruby)
 
 ## Contributors
 

@@ -1,6 +1,6 @@
 # encoding: UTF-8
 
-require "helper"
+require File.expand_path("helper", File.dirname(__FILE__))
 
 class TestInternals < Test::Unit::TestCase
 
@@ -67,6 +67,17 @@ class TestInternals < Test::Unit::TestCase
     assert_equal 1, Redis.current.client.db
   end
 
+  def test_redis_connected?
+    fresh_client = _new_client
+    assert !fresh_client.connected?
+
+    fresh_client.ping
+    assert fresh_client.connected?
+
+    fresh_client.quit
+    assert !fresh_client.connected?
+  end
+
   def test_default_id_with_host_and_port
     redis = Redis.new(OPTIONS.merge(:host => "host", :port => "1234", :db => 0))
     assert_equal "redis://host:1234/0", redis.client.id
@@ -98,6 +109,17 @@ class TestInternals < Test::Unit::TestCase
     end
   end
 
+  def test_id_inside_multi
+    redis = Redis.new(OPTIONS)
+    id = nil
+
+    redis.multi do
+      id = redis.id
+    end
+
+    assert_equal id, "redis://127.0.0.1:6381/15"
+  end
+
   driver(:ruby) do
     def test_tcp_keepalive
       keepalive = {:time => 20, :intvl => 10, :probes => 5}
@@ -117,16 +139,16 @@ class TestInternals < Test::Unit::TestCase
   end
 
   def test_time
-    return if version < "2.5.4"
+    target_version "2.5.4" do
+      # Test that the difference between the time that Ruby reports and the time
+      # that Redis reports is minimal (prevents the test from being racy).
+      rv = r.time
 
-    # Test that the difference between the time that Ruby reports and the time
-    # that Redis reports is minimal (prevents the test from being racy).
-    rv = r.time
+      redis_usec = rv[0] * 1_000_000 + rv[1]
+      ruby_usec = Integer(Time.now.to_f * 1_000_000)
 
-    redis_usec = rv[0] * 1_000_000 + rv[1]
-    ruby_usec = Integer(Time.now.to_f * 1_000_000)
-
-    assert 500_000 > (ruby_usec - redis_usec).abs
+      assert 500_000 > (ruby_usec - redis_usec).abs
+    end
   end
 
   def test_connection_timeout
@@ -297,5 +319,27 @@ class TestInternals < Test::Unit::TestCase
     ensure
       serv.close if serv
     end
+  end
+
+  def test_client_options
+    redis = Redis.new(OPTIONS.merge(:host => "host", :port => 1234, :db => 1, :scheme => "foo"))
+
+    assert_equal "host", redis.client.options[:host]
+    assert_equal 1234, redis.client.options[:port]
+    assert_equal 1, redis.client.options[:db]
+    assert_equal "foo", redis.client.options[:scheme]
+  end
+
+  def test_does_not_change_self_client_options
+    redis = Redis.new(OPTIONS.merge(:host => "host", :port => 1234, :db => 1, :scheme => "foo"))
+    options = redis.client.options
+
+    options[:host] << "new_host"
+    options[:scheme] << "bar"
+    options.merge!(:db => 0)
+
+    assert_equal "host", redis.client.options[:host]
+    assert_equal 1, redis.client.options[:db]
+    assert_equal "foo", redis.client.options[:scheme]
   end
 end

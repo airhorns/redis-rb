@@ -1,4 +1,5 @@
-$:.unshift File.expand_path('../lib', File.dirname(__FILE__))
+$:.unshift File.expand_path("../lib", File.dirname(__FILE__))
+$:.unshift File.expand_path(File.dirname(__FILE__))
 
 require "test/unit"
 require "logger"
@@ -21,7 +22,7 @@ require "support/redis_mock"
 require "support/connection/#{ENV["conn"]}"
 
 PORT    = 6381
-OPTIONS = {:port => PORT, :db => 15, :timeout => 0.1}
+OPTIONS = {:port => PORT, :db => 15, :timeout => Float(ENV["TIMEOUT"] || 0.1)}
 NODES   = ["redis://127.0.0.1:#{PORT}/15"]
 
 def init(redis)
@@ -90,6 +91,14 @@ module Helper
     end
   end
 
+  def try_encoding(encoding, &block)
+    if defined?(Encoding)
+      with_external_encoding(encoding, &block)
+    else
+      yield
+    end
+  end
+
   class Version
 
     include Comparable
@@ -149,6 +158,18 @@ module Helper
         yield _new_client(options.merge(:port => port))
       end
     end
+
+    def assert_in_range(range, value)
+      assert range.include?(value), "expected #{value} to be in #{range.inspect}"
+    end
+
+    def target_version(target)
+      if version < target
+        skip("Requires Redis > #{target}") if respond_to?(:skip)
+      else
+        yield
+      end
+    end
   end
 
   module Client
@@ -166,7 +187,7 @@ module Helper
     end
 
     def _new_client(options = {})
-      Redis.new(_format_options(options))
+      Redis.new(_format_options(options).merge(:driver => ENV["conn"]))
     end
   end
 
@@ -188,7 +209,7 @@ module Helper
     end
 
     def _new_client(options = {})
-      Redis::Distributed.new(NODES, _format_options(options))
+      Redis::Distributed.new(NODES, _format_options(options).merge(:driver => ENV["conn"]))
     end
   end
 end

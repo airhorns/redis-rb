@@ -1,6 +1,6 @@
 # encoding: UTF-8
 
-require "helper"
+require File.expand_path("helper", File.dirname(__FILE__))
 
 class TestPipeliningCommands < Test::Unit::TestCase
 
@@ -203,5 +203,42 @@ class TestPipeliningCommands < Test::Unit::TestCase
     end
 
     assert_equal "bar", r.get("foo")
+  end
+
+  def test_pipeline_select
+    r.select 1
+    r.set("db", "1")
+
+    r.pipelined do |p|
+      p.select 2
+      p.set("db", "2")
+    end
+
+    r.select 1
+    assert_equal "1", r.get("db")
+
+    r.select 2
+    assert_equal "2", r.get("db")
+  end
+
+  def test_pipeline_select_client_db
+    r.select 1
+    r.pipelined do |p2|
+      p2.select 2
+    end
+
+    assert_equal 2, r.client.db
+  end
+
+  def test_nested_pipeline_select_client_db
+    r.select 1
+    r.pipelined do |p2|
+      p2.select 2
+      p2.pipelined do |p3|
+        p3.select 3
+      end
+    end
+
+    assert_equal 3, r.client.db
   end
 end

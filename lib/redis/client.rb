@@ -19,6 +19,10 @@ class Redis
       :tcp_keepalive => 0
     }
 
+    def options
+      Marshal.load(Marshal.dump(@options))
+    end
+
     def scheme
       @options[:scheme]
     end
@@ -51,6 +55,10 @@ class Redis
       @options[:db] = db.to_i
     end
 
+    def driver
+      @options[:driver]
+    end
+
     attr_accessor :logger
     attr_reader :connection
     attr_reader :command_map
@@ -66,9 +74,13 @@ class Redis
     def connect
       @pid = Process.pid
 
-      establish_connection
-      call [:auth, password] if password
-      call [:select, db] if db != 0
+      # Don't try to reconnect when the connection is fresh
+      with_reconnect(false) do
+        establish_connection
+        call [:auth, password] if password
+        call [:select, db] if db != 0
+      end
+
       self
     end
 
@@ -118,7 +130,9 @@ class Redis
     def call_pipeline(pipeline)
       with_reconnect pipeline.with_reconnect? do
         begin
-          pipeline.finish(call_pipelined(pipeline.commands))
+          pipeline.finish(call_pipelined(pipeline.commands)).tap do
+            self.db = pipeline.db if pipeline.db
+          end
         rescue ConnectionError => e
           return nil if pipeline.shutdown?
           # Assume the pipeline was sent in one piece, but execution of
@@ -190,7 +204,7 @@ class Redis
     end
 
     def connected?
-      connection && connection.connected?
+      !! (connection && connection.connected?)
     end
 
     def disconnect
@@ -257,13 +271,17 @@ class Redis
 
       begin
         commands.each do |name, *args|
-          @logger.debug("Redis >> #{name.to_s.upcase} #{args.map(&:to_s).join(" ")}")
+          logged_args = args.map do |a|
+            str = a.respond_to?(:inspect) ? a.inspect : a.to_s
+            str.truncate(100)
+          end
+          @logger.debug("[Redis] name=#{name.to_s.upcase} args=#{logged_args.join(" ")}")
         end
 
         t1 = Time.now
         yield
       ensure
-        @logger.debug("Redis >> %0.2fms" % ((Time.now - t1) * 1000)) if t1
+        @logger.debug("[Redis] call_time=%0.2f ms" % ((Time.now - t1) * 1000)) if t1
       end
     end
 
@@ -388,18 +406,11 @@ class Redis
       driver = driver.to_s if driver.is_a?(Symbol)
 
       if driver.kind_of?(String)
-        case driver
-        when "ruby"
-          require "redis/connection/ruby"
-          driver = Connection::Ruby
-        when "hiredis"
-          require "redis/connection/hiredis"
-          driver = Connection::Hiredis
-        when "synchrony"
-          require "redis/connection/synchrony"
-          driver = Connection::Synchrony
-        else
-          raise "Unknown driver: #{driver}"
+        begin
+          require "redis/connection/#{driver}"
+          driver = Connection.const_get(driver.capitalize)
+        rescue LoadError, NameError
+          raise RuntimeError, "Cannot load driver #{driver.inspect}"
         end
       end
 

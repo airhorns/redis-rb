@@ -1,6 +1,6 @@
 # encoding: UTF-8
 
-require "helper"
+require File.expand_path("helper", File.dirname(__FILE__))
 require "lint/value_types"
 
 class TestDistributedCommandsOnValueTypes < Test::Unit::TestCase
@@ -83,5 +83,13 @@ class TestDistributedCommandsOnValueTypes < Test::Unit::TestCase
     r.flushdb
 
     assert_equal [0], r.dbsize
+  end
+
+  def test_migrate
+    r.set("foo", "s1")
+
+    assert_raise Redis::Distributed::CannotDistribute do
+      r.migrate("foo", {})
+    end
   end
 end

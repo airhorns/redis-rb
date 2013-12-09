@@ -27,7 +27,7 @@ class Redis
   include MonitorMixin
 
   def initialize(options = {})
-    @client = Client.new(options)
+    @original_client = @client = Client.new(options)
 
     super() # Monitor#initialize
   end
@@ -46,6 +46,11 @@ class Redis
   # Run code without the client reconnecting
   def without_reconnect(&blk)
     with_reconnect(false, &blk)
+  end
+
+  # Test whether or not the client is connected
+  def connected?
+    @original_client.connected?
   end
 
   # Authenticate to the server.
@@ -123,14 +128,14 @@ class Redis
 
   # Get or set server configuration parameters.
   #
-  # @param [String] action e.g. `get`, `set`, `resetstat`
+  # @param [Symbol] action e.g. `:get`, `:set`, `:resetstat`
   # @return [String, Hash] string reply, or hash when retrieving more than one
   #   property with `CONFIG GET`
   def config(action, *args)
     synchronize do |client|
       client.call([:config, action] + args) do |reply|
         if reply.kind_of?(Array) && action == :get
-          Hash[reply.each_slice(2).to_a]
+          Hash[_pairify(reply)]
         else
           reply
         end
@@ -381,6 +386,26 @@ class Redis
     end
   end
 
+  # Transfer a key from the connected instance to another instance.
+  #
+  # @param [String] key
+  # @param [Hash] options
+  #   - `:host => String`: host of instance to migrate to
+  #   - `:port => Integer`: port of instance to migrate to
+  #   - `:db => Integer`: database to migrate to (default: same as source)
+  #   - `:timeout => Integer`: timeout (default: same as connection timeout)
+  # @return [String] `"OK"`
+  def migrate(key, options)
+    host = options[:host] || raise(RuntimeError, ":host not specified")
+    port = options[:port] || raise(RuntimeError, ":port not specified")
+    db = (options[:db] || client.db).to_i
+    timeout = (options[:timeout] || client.timeout).to_i
+
+    synchronize do |client|
+      client.call([:migrate, host, port, key, db, timeout])
+    end
+  end
+
   # Delete one or more keys.
   #
   # @param [String, Array<String>] keys
@@ -430,7 +455,7 @@ class Redis
   #     # => "OK"
   #   redis.exists "foo"
   #     # => true
-  #   resis.get "foo"
+  #   redis.get "foo"
   #     # => "bar"
   #
   # @param [String] key
@@ -614,9 +639,7 @@ class Redis
   # @return [Float] value after incrementing it
   def incrbyfloat(key, increment)
     synchronize do |client|
-      client.call([:incrbyfloat, key, increment]) do |reply|
-        _floatify(reply) if reply
-      end
+      client.call([:incrbyfloat, key, increment], &_floatify)
     end
   end
 
@@ -624,10 +647,33 @@ class Redis
   #
   # @param [String] key
   # @param [String] value
-  # @return `"OK"`
-  def set(key, value)
+  # @param [Hash] options
+  #   - `:ex => Fixnum`: Set the specified expire time, in seconds.
+  #   - `:px => Fixnum`: Set the specified expire time, in milliseconds.
+  #   - `:nx => true`: Only set the key if it does not already exist.
+  #   - `:xx => true`: Only set the key if it already exist.
+  # @return [String, Boolean] `"OK"` or true, false if `:nx => true` or `:xx => true`
+  def set(key, value, options = {})
+    args = []
+
+    ex = options[:ex]
+    args.concat(["EX", ex]) if ex
+
+    px = options[:px]
+    args.concat(["PX", px]) if px
+
+    nx = options[:nx]
+    args.concat(["NX"]) if nx
+
+    xx = options[:xx]
+    args.concat(["XX"]) if xx
+
     synchronize do |client|
-      client.call([:set, key, value.to_s])
+      if nx || xx
+        client.call([:set, key, value.to_s] + args, &_boolify_set)
+      else
+        client.call([:set, key, value.to_s] + args)
+      end
     end
   end
 
@@ -1369,9 +1415,7 @@ class Redis
   # @return [Float] score of the member after incrementing it
   def zincrby(key, increment, member)
     synchronize do |client|
-      client.call([:zincrby, key, increment, member]) do |reply|
-        _floatify(reply) if reply
-      end
+      client.call([:zincrby, key, increment, member], &_floatify)
     end
   end
 
@@ -1417,9 +1461,7 @@ class Redis
   # @return [Float] score of the member
   def zscore(key, member)
     synchronize do |client|
-      client.call([:zscore, key, member]) do |reply|
-        _floatify(reply) if reply
-      end
+      client.call([:zscore, key, member], &_floatify)
     end
   end
 
@@ -1445,20 +1487,14 @@ class Redis
     args = []
 
     with_scores = options[:with_scores] || options[:withscores]
-    args << "WITHSCORES" if with_scores
+
+    if with_scores
+      args << "WITHSCORES"
+      block = _floatify_pairs
+    end
 
     synchronize do |client|
-      client.call([:zrange, key, start, stop] + args) do |reply|
-        if with_scores
-          if reply
-            reply.each_slice(2).map do |member, score|
-              [member, _floatify(score)]
-            end
-          end
-        else
-          reply
-        end
-      end
+      client.call([:zrange, key, start, stop] + args, &block)
     end
   end
 
@@ -1477,20 +1513,14 @@ class Redis
     args = []
 
     with_scores = options[:with_scores] || options[:withscores]
-    args << "WITHSCORES" if with_scores
+
+    if with_scores
+      args << "WITHSCORES"
+      block = _floatify_pairs
+    end
 
     synchronize do |client|
-      client.call([:zrevrange, key, start, stop] + args) do |reply|
-        if with_scores
-          if reply
-            reply.each_slice(2).map do |member, score|
-              [member, _floatify(score)]
-            end
-          end
-        else
-          reply
-        end
-      end
+      client.call([:zrevrange, key, start, stop] + args, &block)
     end
   end
 
@@ -1567,23 +1597,17 @@ class Redis
     args = []
 
     with_scores = options[:with_scores] || options[:withscores]
-    args.concat(["WITHSCORES"]) if with_scores
+
+    if with_scores
+      args << "WITHSCORES"
+      block = _floatify_pairs
+    end
 
     limit = options[:limit]
     args.concat(["LIMIT"] + limit) if limit
 
     synchronize do |client|
-      client.call([:zrangebyscore, key, min, max] + args) do |reply|
-        if with_scores
-          if reply
-            reply.each_slice(2).map do |member, score|
-              [member, _floatify(score)]
-            end
-          end
-        else
-          reply
-        end
-      end
+      client.call([:zrangebyscore, key, min, max] + args, &block)
     end
   end
 
@@ -1605,23 +1629,17 @@ class Redis
     args = []
 
     with_scores = options[:with_scores] || options[:withscores]
-    args.concat(["WITHSCORES"]) if with_scores
+
+    if with_scores
+      args << ["WITHSCORES"]
+      block = _floatify_pairs
+    end
 
     limit = options[:limit]
     args.concat(["LIMIT"] + limit) if limit
 
     synchronize do |client|
-      client.call([:zrevrangebyscore, key, max, min] + args) do |reply|
-        if with_scores
-          if reply
-            reply.each_slice(2).map do |member, score|
-              [member, _floatify(score)]
-            end
-          end
-        else
-          reply
-        end
-      end
+      client.call([:zrevrangebyscore, key, max, min] + args, &block)
     end
   end
 
@@ -1883,9 +1901,7 @@ class Redis
   # @return [Float] value of the field after incrementing it
   def hincrbyfloat(key, field, increment)
     synchronize do |client|
-      client.call([:hincrbyfloat, key, field, increment]) do |reply|
-        _floatify(reply) if reply
-      end
+      client.call([:hincrbyfloat, key, field, increment], &_floatify)
     end
   end
 
@@ -2223,16 +2239,187 @@ class Redis
     _eval(:evalsha, args)
   end
 
-  def id
+  def _scan(command, cursor, args, options = {}, &block)
+    # SSCAN/ZSCAN/HSCAN already prepend the key to +args+.
+
+    args << cursor
+
+    if match = options[:match]
+      args.concat(["MATCH", match])
+    end
+
+    if count = options[:count]
+      args.concat(["COUNT", count])
+    end
+
     synchronize do |client|
-      client.id
+      client.call([command] + args, &block)
     end
   end
 
-  def inspect
-    synchronize do |client|
-      "#<Redis client v#{Redis::VERSION} for #{client.id}>"
+  # Scan the keyspace
+  #
+  # @example Retrieve the first batch of keys
+  #   redis.scan(0)
+  #     # => ["4", ["key:21", "key:47", "key:42"]]
+  # @example Retrieve a batch of keys matching a pattern
+  #   redis.scan(4, :match => "key:1?")
+  #     # => ["92", ["key:13", "key:18"]]
+  #
+  # @param [String, Integer] cursor: the cursor of the iteration
+  # @param [Hash] options
+  #   - `:match => String`: only return keys matching the pattern
+  #   - `:count => Integer`: return count keys at most per iteration
+  #
+  # @return [String, Array<String>] the next cursor and all found keys
+  def scan(cursor, options={})
+    _scan(:scan, cursor, [], options)
+  end
+
+  # Scan the keyspace
+  #
+  # @example Retrieve all of the keys (with possible duplicates)
+  #   redis.scan_each.to_a
+  #     # => ["key:21", "key:47", "key:42"]
+  # @example Execute block for each key matching a pattern
+  #   redis.scan_each(:match => "key:1?") {|key| puts key}
+  #     # => key:13
+  #     # => key:18
+  #
+  # @param [Hash] options
+  #   - `:match => String`: only return keys matching the pattern
+  #   - `:count => Integer`: return count keys at most per iteration
+  #
+  # @return [Enumerator] an enumerator for all found keys
+  def scan_each(options={}, &block)
+    return to_enum(:scan_each, options) unless block_given?
+    cursor = 0
+    loop do
+      cursor, keys = scan(cursor, options)
+      keys.each(&block)
+      break if cursor == "0"
     end
+  end
+
+  # Scan a hash
+  #
+  # @example Retrieve the first batch of key/value pairs in a hash
+  #   redis.hscan("hash", 0)
+  #
+  # @param [String, Integer] cursor: the cursor of the iteration
+  # @param [Hash] options
+  #   - `:match => String`: only return keys matching the pattern
+  #   - `:count => Integer`: return count keys at most per iteration
+  #
+  # @return [String, Array<[String, String]>] the next cursor and all found keys
+  def hscan(key, cursor, options={})
+    _scan(:hscan, cursor, [key], options) do |reply|
+      [reply[0], _pairify(reply[1])]
+    end
+  end
+
+  # Scan a hash
+  #
+  # @example Retrieve all of the key/value pairs in a hash
+  #   redis.hscan_each("hash").to_a
+  #   # => [["key70", "70"], ["key80", "80"]]
+  #
+  # @param [Hash] options
+  #   - `:match => String`: only return keys matching the pattern
+  #   - `:count => Integer`: return count keys at most per iteration
+  #
+  # @return [Enumerator] an enumerator for all found keys
+  def hscan_each(key, options={}, &block)
+    return to_enum(:hscan_each, key, options) unless block_given?
+    cursor = 0
+    loop do
+      cursor, values = hscan(key, cursor, options)
+      values.each(&block)
+      break if cursor == "0"
+    end
+  end
+
+  # Scan a sorted set
+  #
+  # @example Retrieve the first batch of key/value pairs in a hash
+  #   redis.zscan("zset", 0)
+  #
+  # @param [String, Integer] cursor: the cursor of the iteration
+  # @param [Hash] options
+  #   - `:match => String`: only return keys matching the pattern
+  #   - `:count => Integer`: return count keys at most per iteration
+  #
+  # @return [String, Array<[String, Float]>] the next cursor and all found
+  #   members and scores
+  def zscan(key, cursor, options={})
+    _scan(:zscan, cursor, [key], options) do |reply|
+      [reply[0], _floatify_pairs.call(reply[1])]
+    end
+  end
+
+  # Scan a sorted set
+  #
+  # @example Retrieve all of the members/scores in a sorted set
+  #   redis.zscan_each("zset").to_a
+  #   # => [["key70", "70"], ["key80", "80"]]
+  #
+  # @param [Hash] options
+  #   - `:match => String`: only return keys matching the pattern
+  #   - `:count => Integer`: return count keys at most per iteration
+  #
+  # @return [Enumerator] an enumerator for all found scores and members
+  def zscan_each(key, options={}, &block)
+    return to_enum(:zscan_each, key, options) unless block_given?
+    cursor = 0
+    loop do
+      cursor, values = zscan(key, cursor, options)
+      values.each(&block)
+      break if cursor == "0"
+    end
+  end
+
+  # Scan a set
+  #
+  # @example Retrieve the first batch of keys in a set
+  #   redis.sscan("set", 0)
+  #
+  # @param [String, Integer] cursor: the cursor of the iteration
+  # @param [Hash] options
+  #   - `:match => String`: only return keys matching the pattern
+  #   - `:count => Integer`: return count keys at most per iteration
+  #
+  # @return [String, Array<String>] the next cursor and all found members
+  def sscan(key, cursor, options={})
+    _scan(:sscan, cursor, [key], options)
+  end
+
+  # Scan a set
+  #
+  # @example Retrieve all of the keys in a set
+  #   redis.sscan("set").to_a
+  #   # => ["key1", "key2", "key3"]
+  #
+  # @param [Hash] options
+  #   - `:match => String`: only return keys matching the pattern
+  #   - `:count => Integer`: return count keys at most per iteration
+  #
+  # @return [Enumerator] an enumerator for all keys in the set
+  def sscan_each(key, options={}, &block)
+    return to_enum(:sscan_each, key, options) unless block_given?
+    cursor = 0
+    loop do
+      cursor, keys = sscan(key, cursor, options)
+      keys.each(&block)
+      break if cursor == "0"
+    end
+  end
+
+  def id
+    @original_client.id
+  end
+
+  def inspect
+    "#<Redis client v#{Redis::VERSION} for #{id}>"
   end
 
   def method_missing(command, *args)
@@ -2252,6 +2439,16 @@ private
     }
   end
 
+  def _boolify_set
+    lambda { |value|
+      if value && "OK" == value
+        true
+      else
+        false
+      end
+    }
+  end
+
   def _hashify
     lambda { |array|
       hash = Hash.new
@@ -2262,12 +2459,30 @@ private
     }
   end
 
-  def _floatify(str)
-    if (inf = str.match(/^(-)?inf/i))
-      (inf[1] ? -1.0 : 1.0) / 0.0
-    else
-      Float str
-    end
+  def _floatify
+    lambda { |str|
+      return unless str
+
+      if (inf = str.match(/^(-)?inf/i))
+        (inf[1] ? -1.0 : 1.0) / 0.0
+      else
+        Float(str)
+      end
+    }
+  end
+
+  def _floatify_pairs
+    lambda { |array|
+      return unless array
+
+      array.each_slice(2).map do |member, score|
+        [member, _floatify.call(score)]
+      end
+    }
+  end
+
+  def _pairify(array)
+    array.each_slice(2).to_a
   end
 
   def _subscription(method, channels, block)

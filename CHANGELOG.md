@@ -1,6 +1,16 @@
-# 3.0.5 (unreleased)
+# 3.0.6
 
-* ...
+* Added support for `SCAN` and variants.
+
+# 3.0.5
+
+* Fix calling #select from a pipeline (#309).
+
+* Added method `Redis#connected?`.
+
+* Added support for `MIGRATE` (Redis 2.6).
+
+* Support extended SET command (#343, thanks to @benubois).
 
 # 3.0.4
 

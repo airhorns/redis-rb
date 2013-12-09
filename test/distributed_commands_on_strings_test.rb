@@ -1,6 +1,6 @@
 # encoding: UTF-8
 
-require "helper"
+require File.expand_path("helper", File.dirname(__FILE__))
 require "lint/strings"
 
 class TestDistributedCommandsOnStrings < Test::Unit::TestCase
@@ -47,13 +47,13 @@ class TestDistributedCommandsOnStrings < Test::Unit::TestCase
   end
 
   def test_bitop
-    return if version < "2.5.10"
+    target_version "2.5.10" do
+      assert_raise Redis::Distributed::CannotDistribute do
+        r.set("foo", "a")
+        r.set("bar", "b")
 
-    assert_raise Redis::Distributed::CannotDistribute do
-      r.set("foo", "a")
-      r.set("bar", "b")
-
-      r.bitop(:and, "foo&bar", "foo", "bar")
+        r.bitop(:and, "foo&bar", "foo", "bar")
+      end
     end
   end
 end

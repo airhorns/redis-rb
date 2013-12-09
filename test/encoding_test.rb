@@ -1,6 +1,6 @@
 # encoding: UTF-8
 
-require "helper"
+require File.expand_path("helper", File.dirname(__FILE__))
 
 class TestEncoding < Test::Unit::TestCase
 
